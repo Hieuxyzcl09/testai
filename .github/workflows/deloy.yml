@@ -1,0 +1,159 @@
+name: Deploy Stable AI Chatbot
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+
+    - name: Set up Python
+      uses: actions/setup-python@v2
+      with:
+        python-version: '3.9'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install torch transformers flask gunicorn
+
+    - name: Create main.py
+      run: |
+        cat << EOF > main.py
+        from flask import Flask, request, jsonify, render_template
+        from transformers import GPT2LMHeadModel, GPT2Tokenizer
+        import torch
+
+        app = Flask(__name__)
+
+        # Initialize the model
+        model_name = "distilgpt2"
+        tokenizer = GPT2Tokenizer.from_pretrained(model_name)
+        model = GPT2LMHeadModel.from_pretrained(model_name)
+
+        @app.route('/')
+        def home():
+            return render_template('index.html')
+
+        @app.route('/generate', methods=['POST'])
+        def generate():
+            data = request.json
+            prompt = data.get('prompt', '')
+            
+            input_ids = tokenizer.encode(prompt, return_tensors='pt')
+            
+            with torch.no_grad():
+                output = model.generate(
+                    input_ids,
+                    max_length=150,
+                    num_return_sequences=1,
+                    no_repeat_ngram_size=2,
+                    top_k=50,
+                    top_p=0.95,
+                    temperature=0.7
+                )
+            
+            response = tokenizer.decode(output[0], skip_special_tokens=True)
+            
+            return jsonify({'response': response})
+
+        if __name__ == '__main__':
+            app.run(host='0.0.0.0', port=8080)
+        EOF
+
+    - name: Create index.html
+      run: |
+        mkdir templates
+        cat << EOF > templates/index.html
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Stable AI Chatbot</title>
+            <style>
+                body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+                #chatbox { height: 400px; border: 1px solid #ddd; overflow-y: scroll; padding: 10px; margin-bottom: 10px; }
+                #user-input { width: 100%; padding: 10px; margin-bottom: 10px; }
+                #send-btn { padding: 10px 20px; }
+            </style>
+        </head>
+        <body>
+            <h1>Stable AI Chatbot (DistilGPT2)</h1>
+            <div id="chatbox"></div>
+            <input type="text" id="user-input" placeholder="Type your message here...">
+            <button id="send-btn">Send</button>
+
+            <script>
+                const chatbox = document.getElementById('chatbox');
+                const userInput = document.getElementById('user-input');
+                const sendBtn = document.getElementById('send-btn');
+
+                sendBtn.addEventListener('click', sendMessage);
+                userInput.addEventListener('keypress', function(e) {
+                    if (e.key === 'Enter') sendMessage();
+                });
+
+                function sendMessage() {
+                    const message = userInput.value;
+                    if (message.trim() === '') return;
+
+                    appendMessage('User: ' + message);
+                    userInput.value = '';
+
+                    fetch('/generate', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({prompt: message}),
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        appendMessage('AI: ' + data.response);
+                    })
+                    .catch((error) => {
+                        console.error('Error:', error);
+                        appendMessage('AI: Sorry, there was an error processing your request.');
+                    });
+                }
+
+                function appendMessage(message) {
+                    const messageElement = document.createElement('p');
+                    messageElement.textContent = message;
+                    chatbox.appendChild(messageElement);
+                    chatbox.scrollTop = chatbox.scrollHeight;
+                }
+            </script>
+        </body>
+        </html>
+        EOF
+
+    - name: Set up virtual environment
+      run: |
+        python -m venv venv
+        source venv/bin/activate
+
+    - name: Start Flask server
+      run: |
+        gunicorn main:app &
+      env:
+        PYTHONUNBUFFERED: 1
+
+    - name: Wait for server to start
+      run: sleep 30
+
+    - name: Deploy to GitHub Pages
+      uses: peaceiris/actions-gh-pages@v3
+      with:
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        publish_dir: ./templates
+
+    - name: Schedule shutdown
+      run: |
+        (sleep 2400 && kill $(pgrep gunicorn)) &
+
+    - name: Keep alive for 40 minutes
+      run: sleep 2400
